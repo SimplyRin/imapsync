@@ -1,0 +1,222 @@
+name: Build Linux Binary and Release
+
+on:
+  push:
+    branches: [master, main]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a new release'
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(cat VERSION | tr -d '\n')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building imapsync version: $VERSION"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            perl \
+            cpanminus \
+            make \
+            gcc \
+            g++ \
+            libssl-dev \
+            libpar-perl \
+            libpar-packer-perl \
+            libio-socket-ssl-perl \
+            libnet-ssleay-perl \
+            libdigest-hmac-perl \
+            libfile-copy-recursive-perl \
+            libio-tee-perl \
+            libmail-imapclient-perl \
+            libterm-readkey-perl \
+            libtest-simple-perl \
+            libtest-pod-perl \
+            libparse-recdescent-perl \
+            libreadonly-perl \
+            libregexp-common-perl \
+            libunicode-string-perl \
+            libproc-processtable-perl \
+            libjson-perl \
+            libwww-perl \
+            libhtml-parser-perl \
+            libcgi-pm-perl \
+            libdata-uniqid-perl \
+            libfile-tail-perl \
+            libio-socket-inet6-perl \
+            libgetopt-argvfile-perl \
+            libarchive-zip-perl
+
+      - name: Install Perl modules via cpanm
+        run: |
+          # Install cpanminus if not available
+          which cpanm || sudo cpan App::cpanminus
+          
+          # Install PAR::Packer dependencies first
+          sudo cpanm --notest \
+            Getopt::ArgvFile \
+            Archive::Zip \
+            PAR \
+            PAR::Dist
+          
+          # Install PAR::Packer with verbose output for debugging
+          sudo cpanm --notest --verbose PAR::Packer || {
+            echo "PAR::Packer installation failed, trying alternative method..."
+            # Try forcing install
+            sudo cpanm --notest --force PAR::Packer
+          }
+          
+          # Verify PAR::Packer installation
+          which pp || {
+            echo "pp not found in PATH, checking installation..."
+            perl -MPAR::Packer -e 'print "PAR::Packer version: $PAR::Packer::VERSION\n"'
+          }
+          
+          # Install remaining required Perl modules
+          sudo cpanm --notest \
+            Authen::NTLM \
+            Compress::Zlib \
+            Crypt::OpenSSL::RSA \
+            Data::Dumper \
+            Data::Uniqid \
+            Digest::HMAC \
+            Digest::HMAC_MD5 \
+            Digest::MD5 \
+            Dist::CheckConflicts \
+            Encode \
+            Encode::Byte \
+            Encode::IMAPUTF7 \
+            File::Copy::Recursive \
+            File::Tail \
+            IO::Socket::INET \
+            IO::Socket::INET6 \
+            IO::Socket::SSL \
+            IO::Tee \
+            JSON \
+            JSON::WebToken \
+            JSON::WebToken::Crypt::RSA \
+            HTML::Entities \
+            LWP::UserAgent \
+            Mail::IMAPClient \
+            MIME::Base64 \
+            Module::Implementation \
+            Module::Runtime \
+            Module::ScanDeps \
+            Net::SSLeay \
+            Package::Stash \
+            Package::Stash::XS \
+            Parse::RecDescent \
+            Pod::Usage \
+            Proc::ProcessTable \
+            Readonly \
+            Regexp::Common \
+            Sys::MemInfo \
+            Term::ReadKey \
+            Test::Fatal \
+            Test::Mock::Guard \
+            Test::MockObject \
+            Test::More \
+            Test::Pod \
+            Test::Requires \
+            Test::Deep \
+            Text::ParseWords \
+            Try::Tiny \
+            Unicode::String \
+            URI::Escape
+
+      - name: Verify Perl syntax
+        run: |
+          perl -c imapsync
+          echo "Perl syntax check passed"
+
+      - name: Build Linux binary with PAR::Packer
+        run: |
+          # Get architecture info
+          ARCH=$(uname -m)
+          KERNEL=$(uname -s)
+          BIN_NAME="imapsync_bin_${KERNEL}_${ARCH}"
+          
+          echo "Building binary: $BIN_NAME"
+          
+          # Build the binary using pp (PAR::Packer)
+          pp -x -o "$BIN_NAME" imapsync
+          
+          # Make it executable
+          chmod +x "$BIN_NAME"
+          
+          # Test the binary
+          echo "Testing binary..."
+          ./"$BIN_NAME" --version
+          ./"$BIN_NAME" --justbanner
+          
+          echo "bin_name=$BIN_NAME" >> $GITHUB_OUTPUT
+          echo "Binary built successfully: $BIN_NAME"
+        id: build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: imapsync-linux-x86_64
+          path: imapsync_bin_Linux_x86_64
+          retention-days: 30
+
+      - name: Create Release
+        if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.event.inputs.create_release == 'true') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}-${{ github.run_number }}
+          name: imapsync v${{ steps.version.outputs.version }} (Build ${{ github.run_number }})
+          body: |
+            ## imapsync v${{ steps.version.outputs.version }}
+            
+            ### Linux Binary Release
+            
+            This release contains a pre-built Linux binary for x86_64 architecture.
+            
+            **Target System:**
+            - OS: Linux (Ubuntu 22.04 compatible, kernel 5.15.x)
+            - Architecture: x86_64
+            - Compatible with: `Linux m27.coreserver.jp 5.15.0-164-generic`
+            
+            ### Usage
+            
+            ```bash
+            # Download and make executable
+            chmod +x imapsync_bin_Linux_x86_64
+            
+            # Run imapsync
+            ./imapsync_bin_Linux_x86_64 --help
+            ```
+            
+            ### Build Information
+            - Build Date: ${{ github.event.head_commit.timestamp }}
+            - Commit: ${{ github.sha }}
+            - Workflow Run: ${{ github.run_number }}
+          files: |
+            imapsync_bin_Linux_x86_64
+            imapsync
+            VERSION
+            README
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
